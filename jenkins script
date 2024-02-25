@@ -1,0 +1,145 @@
+pipeline {
+    agent any 
+    tools {
+        maven 'maven3'
+        jdk 'java 1.8.0'
+    }
+    environment {
+        scanner-home =tool 'sonar-scanner'
+        app-name ='java-register-app'
+        RELEASE='1.0.0'
+        Docker-user='srimanth30'
+        docker-pass='dockerhub'
+        image-name='${docker-user}' + '/'+ ${app-name}
+    }
+    stages{
+        stage('git checkout'){
+            steps {
+                git url:
+                branch: dev
+            }
+        }
+        stage('Build package'){
+            steps {
+                sh "mvn package"
+                dir ('webapp')
+            }
+        }
+        stage('sonarqube analysis') {
+            steps{
+                withsonarqube env('sonar-server') {
+                    dir('webapp')
+                    sh'mvn -u clean install sonar:sonar
+                }
+            }
+        }
+        stage('quality gate'){
+            steps{
+                script{
+                    wait for quality abort pipeline:false'
+                    credintialsid:'sonarqube-token'
+                }
+            }
+        }
+        stgae('Artifactory configuration') {
+            steps{
+                rtserver(
+                    id:'jfrog-server',
+                    url:'hhttp://ipaddrd:8082/artifactory,"
+                    credentialsid:"jfrog"
+                    )
+                    rtmavendeployer(
+                        id:"maven-deployer",
+                        serverid:"jfrog-server",
+                        releaserepo:"libs-release-local",
+                        snapshotrepo:"libs-snapshot-local"
+                    )
+                    rtmaven resolver(
+                        id:"maven-resolver"
+                        serverid:"jfrog-server",
+                        releae-repo:"libs-release"
+                        snapshotrepo:"libs-snapshot"
+
+                    )
+            }
+        }
+        stage('deploy artifact') {
+            steps {
+                rtmaven run(
+                    tool:"maven",
+                    pom:'webapp/pom.xml',
+                    goals:'clean install',
+                    deployer_id:'maven_deployer',
+                    resolveid:"mavenresolver"
+                )
+                stage('publish build info) {
+                    steps{
+                        rtpublish build info
+                        serverid:"jfrog-server"
+                    }
+                }
+            }
+        }
+        stage(trivyfs scan) {
+            steps{
+                sh "trivy.fs > trivyfs.txt"
+            
+            }
+        }
+        stage("build &push docker image"){
+            steps{
+                script{
+                    docker.withregistry("     docker-pass") {
+                        docker-image=docker.build "$(image-name)"
+                    }
+                    docker.withregistry("   ",docker-pass) {
+                        docker-image.push ('$(image-tag)')
+                        docker-image.push ('latest')
+                    }
+                }
+            }
+        }
+        stage("trivy image scan") {
+            steps{
+                script{
+                    sh ('docker run -v /var/run/docker.sock:(var/run/docker.sock sec/trivy image github:latest)')
+                }
+            }
+        }
+        stage('cleanup artifacts') {
+            steps{
+                script(
+                    sh "docker rmi $(image-name): (image-tag)"
+                    sh "docker rmi $"(image-name): latest
+                )
+            }
+        }
+        post {
+            alwayss {
+                emailtext attachlog:true,
+                subject:'${currentbuild.result}',
+                body:"project:${env.job-name}"<br/>" +
+                "build number: ${env.build-number} </br/>"+
+                "url: ${env.build-url}<br/>,
+                to:'m.srimanth49@gmail.com',
+                attachmentpattern :'trivyfs.txt,trivyimage.txt'
+            }
+        }
+        stage('deploy to kubernetes') {
+            steps{
+                script{
+                    dir('kubernetes') {
+                        kubeconfig (credntialsid:'kubernetes','serverurl') {
+                            sh 'kubectl apply -f deployment.yml'
+                            sh 'kubectl apply -f service.yml'
+                            sh 'kubectl rollout restart deployment.apps/registerapp-deployment'
+                        }
+                    }
+                }
+            }
+        }
+        
+
+        
+    }
+}
